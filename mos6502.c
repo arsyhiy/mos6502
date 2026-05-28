@@ -6,10 +6,8 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define MEM_SIZE 0x10000 // 64 KB of addressable memory
 
 // flags
-
 typedef enum {
   FLAG_C = 0,
   FLAG_Z,
@@ -21,8 +19,7 @@ typedef enum {
   FLAG_N
 } Flag;
 
-// addresing modes
-
+// addreses modes
 typedef enum {
   IMM,
   ZP,
@@ -40,18 +37,26 @@ typedef enum {
 } AddrMode;
 
 // memory
+#define MEM_SIZE 0x10000 // 64 KB of addressable memory
 typedef struct {
   uint8_t data[MEM_SIZE];
 } Memory;
 
 typedef struct CPU6502 CPU6502;
 
-typedef void (*InstrFn)(CPU6502 *, AddrMode);
-
-// opcode
+// operand
 typedef struct {
-  InstrFn fn;
-  AddrMode mode;
+    uint16_t addr;
+    uint8_t value;
+} Operand;
+
+typedef void (*InstrFn)(CPU6502 *, Operand);
+
+// op code
+typedef struct {
+    InstrFn fn;
+    AddrMode mode;
+    uint8_t base_cycles;
 } Opcode;
 
 // cpu
@@ -71,9 +76,9 @@ struct CPU6502 {
   uint8_t cycles_left;
 };
 
-/* // ========================= */
-/* // MEMORY ACCESS */
-/* // ========================= */
+// =========================
+// MEMORY ACCESS
+// =========================
 
 static uint8_t mem_read(Memory *mem, uint16_t addr) { return mem->data[addr]; }
 
@@ -126,6 +131,7 @@ static uint16_t fetch_word(CPU6502 *cpu) {
 // =========================
 // ADDRESSING
 // =========================
+
 
 static uint16_t get_addr(CPU6502 *cpu, AddrMode mode) {
   switch (mode) {
@@ -185,50 +191,79 @@ static uint16_t get_addr(CPU6502 *cpu, AddrMode mode) {
   }
 }
 
+
+static Operand resolve_operand(CPU6502 *c, AddrMode mode)
+{
+    Operand op = {0};
+
+    switch (mode)
+    {
+        case IMM:
+            op.addr = c->pc++;
+            op.value = mem_read(c->mem, op.addr);
+            break;
+
+        case ZP:
+        case ABS:
+        case ZPX:
+        case ZPY:
+        case ABX:
+        case ABY:
+        case IND:
+        case IZX:
+        case IZY:
+        case REL:
+            op.addr = get_addr(c, mode);
+            op.value = mem_read(c->mem, op.addr);
+            break;
+
+        case IMP:
+        case ACC:
+        default:
+            op.addr = 0;
+            op.value = c->a;
+            break;
+    }
+
+    return op;
+}
+
 // =========================
 // LOAD / STORE
 // =========================
 
-static void LDA(CPU6502 *c, AddrMode m) {
-  c->a = mem_read(c->mem, get_addr(c, m));
-  update_zn(c, c->a);
-}
 
-static void LDX(CPU6502 *c, AddrMode m) {
-  c->x = mem_read(c->mem, get_addr(c, m));
-  update_zn(c, c->x);
-}
 
-static void LDY(CPU6502 *c, AddrMode m) {
-  c->y = mem_read(c->mem, get_addr(c, m));
+static void LDY(CPU6502 *c, Operand op) {
+  c->y = op.value;
   update_zn(c, c->y);
 }
 
-static void STA(CPU6502 *c, AddrMode m) {
-  mem_write(c->mem, get_addr(c, m), c->a);
-}
 
 // =========================
 // TRANSFERS
 // =========================
 
-static void TAX(CPU6502 *c, AddrMode m) {
-  (void)m;
+static void TAX(CPU6502 *c, Operand op) {
+  (void)op;
   c->x = c->a;
   update_zn(c, c->x);
 }
-static void TAY(CPU6502 *c, AddrMode m) {
-  (void)m;
+
+static void TAY(CPU6502 *c, Operand op) {
+  (void)op;
   c->y = c->a;
   update_zn(c, c->y);
 }
-static void TXA(CPU6502 *c, AddrMode m) {
-  (void)m;
+
+static void TXA(CPU6502 *c, Operand op) {
+  (void)op;
   c->a = c->x;
   update_zn(c, c->a);
 }
-static void TYA(CPU6502 *c, AddrMode m) {
-  (void)m;
+
+static void TYA(CPU6502 *c, Operand op) {
+  (void)op;
   c->a = c->y;
   update_zn(c, c->a);
 }
@@ -237,9 +272,8 @@ static void TYA(CPU6502 *c, AddrMode m) {
 // ARITHMETIC
 // =========================
 
-static void ADC(CPU6502 *c, AddrMode m) {
-  uint8_t v = mem_read(c->mem, get_addr(c, m));
-  uint16_t r = c->a + v + (c->status & (1 << FLAG_C));
+static void ADC(CPU6502 *c, Operand op) {
+  uint16_t r = c->a + op.value + (c->status & FLAG_C);
 
   set_flag(c, FLAG_C, r > 0xFF);
   c->a = r & 0xFF;
@@ -250,268 +284,64 @@ static void ADC(CPU6502 *c, AddrMode m) {
 // BRANCH
 // =========================
 
-static void branch(CPU6502 *c, bool cond) {
-  int8_t off = (int8_t)fetch(c);
-  if (cond)
-    c->pc += off;
+static void BEQ(CPU6502 *c, Operand op) {
+  if (c->status & FLAG_Z)
+    c->pc += (int8_t)op.value;
 }
 
-static void BEQ(CPU6502 *c, AddrMode m) {
-  (void)m;
-  branch(c, c->status & (1 << FLAG_Z));
-}
-static void BNE(CPU6502 *c, AddrMode m) {
-  (void)m;
-  branch(c, !(c->status & (1 << FLAG_Z)));
+static void BNE(CPU6502 *c, Operand op) {
+  if (!(c->status & FLAG_Z))
+    c->pc += (int8_t)op.value;
 }
 
 // =========================
 // JUMP
 // =========================
 
-static void JMP(CPU6502 *c, AddrMode m) { c->pc = get_addr(c, m); }
+static void JMP(CPU6502 *c, Operand op) {
+  c->pc = op.addr;
+}
 
 // =========================
 // SYSTEM
 // =========================
 
-static void NOP(CPU6502 *c, AddrMode m) {
+static void NOP(CPU6502 *c, Operand op) {
   (void)c;
-  (void)m;
+  (void)op;
 }
 
-static void BRK(CPU6502 *c, AddrMode m) {
-  (void)m;
+static void BRK(CPU6502 *c, Operand op) {
+  (void)op;
   c->running = false;
 }
+
+
+
 
 // there will go all instructions need to rewrite that's why they will be
 // commented
 
 //   there  i will describe all instructions
-// */
-//
-// /* void lda_imm( */
-// /*     CPU6502* cpu */
-// /* ) { */
-//
-// /*     cpu->a = */
-// /*         imm(cpu); */
-//
-// /*     set_flag( */
-// /*         cpu, */
-// /*         FLAG_Z, */
-// /*         cpu->a == 0 */
-// /*     ); */
-//
-// /*     set_flag( */
-// /*         cpu, */
-// /*         FLAG_N, */
-// /*         cpu->a & 0x80 */
-// /*     ); */
-// /* } */
-//
-// /* void sta_abs( */
-// /*     CPU6502* cpu */
-// /* ) { */
-//
-// /*     cpu_write( */
-// /*         cpu, */ /*         abs_addr(cpu), */ /*         cpu->a */
-// /*     ); */
-// /* } */
-//
-// /* void jmp_abs( */
-// /*     CPU6502* cpu */
-// /* ) { */
-//
-// /*     cpu->pc = */
-// /*         abs_addr(cpu); */
-// /* } */
-//
-// /* void jsr_abs( */
-// /*     CPU6502* cpu */
-// /* ) { */
-//
-// /*     uint16_t addr = */
-// /*         abs_addr(cpu); */
-//
-// /*     uint16_t ret = */
-// /*         ( */
-// /*             cpu->pc */
-// /*             - */
-// /*             1 */
-// /*         ) */
-// /*         & */
-// /*         0xFFFF; */
-//
-// /*     push( */
-// /*         cpu, */
-// /*         ( */
-// /*             ret */
-// /*             >> */
-// /*             8 */
-// /*         ) */
-// /*     ); */
-//
-// /*     push( */
-// /*         cpu, */
-// /*         ret */
-// /*     ); */
-//
-// /*     cpu->pc = */
-// /*         addr; */
-// /* } */
-//
-// /* void rts_imp( */
-// /*     CPU6502* cpu */
-// /* ) { */
-//
-// /*     uint8_t lo = */
-// /*         pop(cpu); */
-//
-// /*     uint8_t hi = */
-// /*         pop(cpu); */
-//
-// /*     cpu->pc = */
-// /*         ( */
-// /*             ( */
-// /*                 hi */
-// /*                 << */
-// /*                 8 */
-// /*             ) */
-// /*             | */
-// /*             lo */
-// /*         ) */
-// /*         + */
-// /*         1; */
-// /* } */
-//
-// /* void brk_imp( */
-// /*     CPU6502* cpu */
-// /* ) { */
-//
-// /*     cpu->running = */
-// /*         false; */
-//
-// /*     cpu->pc++; */
-// /* } */
-//
-// /* void clc_imp( */
-// /*     CPU6502* cpu */
-// /* ) { */
-//
-// /*     set_flag( */
-// /*         cpu, */
-// /*         FLAG_C, */
-// /*         false */
-// /*     ); */
-// /* } */
-//
-// /* void adc_imm( */
-// /*     CPU6502* cpu */
-// /* ) { */
-//
-// /*     uint8_t value = */
-// /*         imm(cpu); */
-//
-// /*     uint8_t carry = */
-// /*         cpu->status */
-// /*         & */
-// /*         1; */
-//
-// /*     uint16_t r = */
-// /*         cpu->a */
-// /*         + */
-// /*         value */
-// /*         + */
-// /*         carry; */
-//
-// /*     set_flag( */
-// /*         cpu, */
-// /*         FLAG_C, */
-// /*         r > 0xFF */
-// /*     ); */
-//
-// /*     cpu->a = */
-// /*         r */
-// /*         & */
-// /*         0xFF; */
-//
-// /*     set_flag( */
-// /*         cpu, */
-// /*         FLAG_Z, */
-// /*         cpu->a == 0 */
-// /*     ); */
-//
-// /*     set_flag( */
-// /*         cpu, */
-// /*         FLAG_N, */
-// /*         cpu->a & 0x80 */
-// /*     ); */
-// /* } */
-//
-//
-//
-// // =========================
-// // Transfer Instructions
-// // =========================
-//
-// static void update_zn(
-//     CPU6502* cpu,
-//     uint8_t value
-// ){
-//     set_flag(
-//         cpu,
-//         Z,
-//         value == 0
-//     );
-//
-//     set_flag(
-//         cpu,
-//         N,
-//         value & 0x80
-//     );
-// }
-//
-//
-// // Load Accumulator
-//
-// void LDA(
-//     CPU6502* cpu,
-//     uint16_t addr
-// ){
-//     cpu->a =
-//         mem_read(
-//             cpu->mem,
-//             addr
-//         );
-//
-//     update_zn(
-//         cpu,
-//         cpu->a
-//     );
-// }
-//
-//
-// // Load X
-//
-// void LDX(
-//     CPU6502* cpu,
-//     uint16_t addr
-// ){
-//     cpu->x =
-//         mem_read(
-//             cpu->mem,
-//             addr
-//         );
-//
-//     update_zn(
-//         cpu,
-//         cpu->x
-//     );
-// }
-//
-//
+
+// =========================
+// Transfer Instructions
+// =========================
+
+
+static void LDA(CPU6502 *c, Operand op) {
+  // load accumulator
+  c->a = op.value;
+  update_zn(c, c->a);
+}
+
+static void LDX(CPU6502 *c, Operand op) {
+  // Load X
+  c->x = op.value;
+  update_zn(c, c->x);
+}
+
+
 // // Load Y
 //
 // void LDY(
@@ -531,19 +361,15 @@ static void BRK(CPU6502 *c, AddrMode m) {
 // }
 //
 //
-// // Store Accumulator
-//
-// void STA(
-//     CPU6502* cpu,
-//     uint16_t addr
-// ){
-//     mem_write(
-//         cpu->mem,
-//         addr,
-//         cpu->a
-//     );
-// }
-//
+
+
+
+static void STA(CPU6502 *c, Operand op) {
+  // Store Accumulator
+  mem_write(c->mem, op.addr, c->a);
+}
+
+
 //
 // // Store X
 //
@@ -1678,76 +1504,249 @@ static void BRK(CPU6502 *c, AddrMode m) {
 // OPCODES
 // =========================
 
-static void init_opcodes(CPU6502 *c) {
-  memset(c->op, 0, sizeof(c->op));
+static void init_opcodes(CPU6502 *c)
+{
+    memset(c->op, 0, sizeof(c->op));
 
-  c->op[0xA9] = (Opcode){LDA, IMM};
-  c->op[0xA5] = (Opcode){LDA, ZP};
-  c->op[0xAD] = (Opcode){LDA, ABS};
+    // =========================
+    // LDA
+    // =========================
+    c->op[0xA9] = (Opcode){LDA, IMM, 2};
+    c->op[0xA5] = (Opcode){LDA, ZP, 3};
+    c->op[0xB5] = (Opcode){LDA, ZPX, 4};
+    c->op[0xAD] = (Opcode){LDA, ABS, 4};
+    c->op[0xBD] = (Opcode){LDA, ABX, 4};
+    c->op[0xB9] = (Opcode){LDA, ABY, 4};
+    c->op[0xA1] = (Opcode){LDA, IZX, 6};
+    c->op[0xB1] = (Opcode){LDA, IZY, 5};
 
-  c->op[0xA2] = (Opcode){LDX, IMM};
-  c->op[0xA6] = (Opcode){LDX, ZP};
-  c->op[0xAE] = (Opcode){LDX, ABS};
+    // =========================
+    // LDX
+    // =========================
+    c->op[0xA2] = (Opcode){LDX, IMM, 2};
+    c->op[0xA6] = (Opcode){LDX, ZP, 3};
+    c->op[0xB6] = (Opcode){LDX, ZPY, 4};
+    c->op[0xAE] = (Opcode){LDX, ABS, 4};
+    c->op[0xBE] = (Opcode){LDX, ABY, 4};
 
-  c->op[0xA0] = (Opcode){LDY, IMM};
+    // =========================
+    // LDY
+    // =========================
+    c->op[0xA0] = (Opcode){LDY, IMM, 2};
+    c->op[0xA4] = (Opcode){LDY, ZP, 3};
+    c->op[0xB4] = (Opcode){LDY, ZPX, 4};
+    c->op[0xAC] = (Opcode){LDY, ABS, 4};
+    c->op[0xBC] = (Opcode){LDY, ABX, 4};
 
-  c->op[0x69] = (Opcode){ADC, IMM};
+    // =========================
+    // STA
+    // =========================
+    c->op[0x85] = (Opcode){STA, ZP, 3};
+    c->op[0x95] = (Opcode){STA, ZPX, 4};
+    c->op[0x8D] = (Opcode){STA, ABS, 4};
+    c->op[0x9D] = (Opcode){STA, ABX, 5};
+    c->op[0x99] = (Opcode){STA, ABY, 5};
+    c->op[0x81] = (Opcode){STA, IZX, 6};
+    c->op[0x91] = (Opcode){STA, IZY, 6};
 
-  c->op[0xF0] = (Opcode){BEQ, REL};
-  c->op[0xD0] = (Opcode){BNE, REL};
+    // =========================
+    // STX
+    // =========================
+    c->op[0x86] = (Opcode){STX, ZP, 3};
+    c->op[0x96] = (Opcode){STX, ZPY, 4};
+    c->op[0x8E] = (Opcode){STX, ABS, 4};
 
-  c->op[0x4C] = (Opcode){JMP, ABS};
+    // =========================
+    // STY
+    // =========================
+    c->op[0x84] = (Opcode){STY, ZP, 3};
+    c->op[0x94] = (Opcode){STY, ZPX, 4};
+    c->op[0x8C] = (Opcode){STY, ABS, 4};
 
-  c->op[0xEA] = (Opcode){NOP, IMP};
-  c->op[0x00] = (Opcode){BRK, IMP};
+    // =========================
+    // TAX / TAY / TXA / TYA
+    // =========================
+    c->op[0xAA] = (Opcode){TAX, IMP, 2};
+    c->op[0xA8] = (Opcode){TAY, IMP, 2};
+    c->op[0x8A] = (Opcode){TXA, IMP, 2};
+    c->op[0x98] = (Opcode){TYA, IMP, 2};
+
+    // =========================
+    // TSX / TXS
+    // =========================
+    c->op[0xBA] = (Opcode){TSX, IMP, 2};
+    c->op[0x9A] = (Opcode){TXS, IMP, 2};
+
+    // =========================
+    // PHA / PHP / PLA / PLP
+    // =========================
+    c->op[0x48] = (Opcode){PHA, IMP, 3};
+    c->op[0x08] = (Opcode){PHP, IMP, 3};
+    c->op[0x68] = (Opcode){PLA, IMP, 4};
+    c->op[0x28] = (Opcode){PLP, IMP, 4};
+
+    // =========================
+    // INC / DEC (memory)
+    // =========================
+    c->op[0xE6] = (Opcode){INC, ZP, 5};
+    c->op[0xF6] = (Opcode){INC, ZPX, 6};
+    c->op[0xEE] = (Opcode){INC, ABS, 6};
+    c->op[0xFE] = (Opcode){INC, ABX, 7};
+
+    c->op[0xC6] = (Opcode){DEC, ZP, 5};
+    c->op[0xD6] = (Opcode){DEC, ZPX, 6};
+    c->op[0xCE] = (Opcode){DEC, ABS, 6};
+    c->op[0xDE] = (Opcode){DEC, ABX, 7};
+
+    // =========================
+    // INX / INY / DEX / DEY
+    // =========================
+    c->op[0xE8] = (Opcode){INX, IMP, 2};
+    c->op[0xC8] = (Opcode){INY, IMP, 2};
+    c->op[0xCA] = (Opcode){DEX, IMP, 2};
+    c->op[0x88] = (Opcode){DEY, IMP, 2};
+
+    // =========================
+    // ADC
+    // =========================
+    c->op[0x69] = (Opcode){ADC, IMM, 2};
+    c->op[0x65] = (Opcode){ADC, ZP, 3};
+    c->op[0x75] = (Opcode){ADC, ZPX, 4};
+    c->op[0x6D] = (Opcode){ADC, ABS, 4};
+    c->op[0x7D] = (Opcode){ADC, ABX, 4};
+    c->op[0x79] = (Opcode){ADC, ABY, 4};
+    c->op[0x61] = (Opcode){ADC, IZX, 6};
+    c->op[0x71] = (Opcode){ADC, IZY, 5};
+
+    // =========================
+    // SBC
+    // =========================
+    c->op[0xE9] = (Opcode){SBC, IMM, 2};
+    c->op[0xE5] = (Opcode){SBC, ZP, 3};
+    c->op[0xF5] = (Opcode){SBC, ZPX, 4};
+    c->op[0xED] = (Opcode){SBC, ABS, 4};
+    c->op[0xFD] = (Opcode){SBC, ABX, 4};
+    c->op[0xF9] = (Opcode){SBC, ABY, 4};
+    c->op[0xE1] = (Opcode){SBC, IZX, 6};
+    c->op[0xF1] = (Opcode){SBC, IZY, 5};
+
+    // =========================
+    // LOGIC
+    // =========================
+    c->op[0x29] = (Opcode){AND, IMM, 2};
+    c->op[0x25] = (Opcode){AND, ZP, 3};
+    c->op[0x35] = (Opcode){AND, ZPX, 4};
+    c->op[0x2D] = (Opcode){AND, ABS, 4};
+    c->op[0x3D] = (Opcode){AND, ABX, 4};
+    c->op[0x39] = (Opcode){AND, ABY, 4};
+    c->op[0x21] = (Opcode){AND, IZX, 6};
+    c->op[0x31] = (Opcode){AND, IZY, 5};
+
+    c->op[0x09] = (Opcode){ORA, IMM, 2};
+    c->op[0x05] = (Opcode){ORA, ZP, 3};
+    c->op[0x15] = (Opcode){ORA, ZPX, 4};
+    c->op[0x0D] = (Opcode){ORA, ABS, 4};
+    c->op[0x1D] = (Opcode){ORA, ABX, 4};
+    c->op[0x19] = (Opcode){ORA, ABY, 4};
+    c->op[0x01] = (Opcode){ORA, IZX, 6};
+    c->op[0x11] = (Opcode){ORA, IZY, 5};
+
+    c->op[0x49] = (Opcode){EOR, IMM, 2};
+    c->op[0x45] = (Opcode){EOR, ZP, 3};
+    c->op[0x55] = (Opcode){EOR, ZPX, 4};
+    c->op[0x4D] = (Opcode){EOR, ABS, 4};
+    c->op[0x5D] = (Opcode){EOR, ABX, 4};
+    c->op[0x59] = (Opcode){EOR, ABY, 4};
+    c->op[0x41] = (Opcode){EOR, IZX, 6};
+    c->op[0x51] = (Opcode){EOR, IZY, 5};
+
+    c->op[0x24] = (Opcode){BIT, ZP, 3};
+    c->op[0x2C] = (Opcode){BIT, ABS, 4};
+
+    // =========================
+    // SHIFT / ROTATE
+    // =========================
+    c->op[0x0A] = (Opcode){ASL_A, ACC, 2};
+    c->op[0x06] = (Opcode){ASL, ZP, 5};
+    c->op[0x16] = (Opcode){ASL, ZPX, 6};
+    c->op[0x0E] = (Opcode){ASL, ABS, 6};
+    c->op[0x1E] = (Opcode){ASL, ABX, 7};
+
+    c->op[0x4A] = (Opcode){LSR_A, ACC, 2};
+    c->op[0x46] = (Opcode){LSR, ZP, 5};
+    c->op[0x56] = (Opcode){LSR, ZPX, 6};
+    c->op[0x4E] = (Opcode){LSR, ABS, 6};
+    c->op[0x5E] = (Opcode){LSR, ABX, 7};
+
+    c->op[0x2A] = (Opcode){ROL_A, ACC, 2};
+    c->op[0x26] = (Opcode){ROL, ZP, 5};
+    c->op[0x36] = (Opcode){ROL, ZPX, 6};
+    c->op[0x2E] = (Opcode){ROL, ABS, 6};
+    c->op[0x3E] = (Opcode){ROL, ABX, 7};
+
+    c->op[0x6A] = (Opcode){ROR_A, ACC, 2};
+    c->op[0x66] = (Opcode){ROR, ZP, 5};
+    c->op[0x76] = (Opcode){ROR, ZPX, 6};
+    c->op[0x6E] = (Opcode){ROR, ABS, 6};
+    c->op[0x7E] = (Opcode){ROR, ABX, 7};
+
+    // =========================
+    // FLAGS
+    // =========================
+    c->op[0x18] = (Opcode){CLC, IMP, 2};
+    c->op[0x38] = (Opcode){SEC, IMP, 2};
+    c->op[0x58] = (Opcode){CLI, IMP, 2};
+    c->op[0x78] = (Opcode){SEI, IMP, 2};
+    c->op[0xB8] = (Opcode){CLV, IMP, 2};
+    c->op[0xD8] = (Opcode){CLD, IMP, 2};
+    c->op[0xF8] = (Opcode){SED, IMP, 2};
+
+    // =========================
+    // CMP / CPX / CPY
+    // =========================
+    c->op[0xC9] = (Opcode){CMP, IMM, 2};
+    c->op[0xC5] = (Opcode){CMP, ZP, 3};
+    c->op[0xD5] = (Opcode){CMP, ZPX, 4};
+    c->op[0xCD] = (Opcode){CMP, ABS, 4};
+    c->op[0xDD] = (Opcode){CMP, ABX, 4};
+    c->op[0xD9] = (Opcode){CMP, ABY, 4};
+    c->op[0xC1] = (Opcode){CMP, IZX, 6};
+    c->op[0xD1] = (Opcode){CMP, IZY, 5};
+
+    c->op[0xE0] = (Opcode){CPX, IMM, 2};
+    c->op[0xE4] = (Opcode){CPX, ZP, 3};
+    c->op[0xEC] = (Opcode){CPX, ABS, 4};
+
+    c->op[0xC0] = (Opcode){CPY, IMM, 2};
+    c->op[0xC4] = (Opcode){CPY, ZP, 3};
+    c->op[0xCC] = (Opcode){CPY, ABS, 4};
+
+    // =========================
+    // BRANCHES
+    // =========================
+    c->op[0x90] = (Opcode){BCC, REL, 2};
+    c->op[0xB0] = (Opcode){BCS, REL, 2};
+    c->op[0xF0] = (Opcode){BEQ, REL, 2};
+    c->op[0x30] = (Opcode){BMI, REL, 2};
+    c->op[0xD0] = (Opcode){BNE, REL, 2};
+    c->op[0x10] = (Opcode){BPL, REL, 2};
+    c->op[0x50] = (Opcode){BVC, REL, 2};
+    c->op[0x70] = (Opcode){BVS, REL, 2};
+
+    // =========================
+    // JUMPS
+    // =========================
+    c->op[0x4C] = (Opcode){JMP, ABS, 3};
+    c->op[0x6C] = (Opcode){JMP, IND, 5};
+    c->op[0x20] = (Opcode){JSR, ABS, 6};
+    c->op[0x60] = (Opcode){RTS, IMP, 6};
+
+    // =========================
+    // SYSTEM
+    // =========================
+    c->op[0xEA] = (Opcode){NOP, IMP, 2};
+    c->op[0x00] = (Opcode){BRK, IMP, 7};
 }
-
-// =========================
-// STEP
-// =========================
-
-// static void step(CPU6502 *c) {
-//   uint8_t op = fetch(c);
-//   Opcode ins = c->op[op];
-//
-//   if (!ins.fn) {
-//     printf("Unknown opcode %02X\n", op);
-//     c->running = false;
-//     return;
-//   }
-//
-//   ins.fn(c, ins.mode);
-// }
-
-
-static const uint8_t opcode_cycles[256] = {
-    [0xA9] = 2, // LDA imm
-    [0xA5] = 3, // LDA zp
-    [0xAD] = 4, // LDA abs
-
-    [0x69] = 2, // ADC imm
-
-    [0x4C] = 3, // JMP abs
-
-    [0xEA] = 2, // NOP
-    [0x00] = 7  // BRK
-};
-
-// static void step(CPU6502* c)
-// {
-//     uint8_t opcode = fetch(c);
-//     Opcode ins = c->op[opcode];
-//
-//     if (!ins.fn) {
-//         printf("Unknown opcode %02X\n", opcode);
-//         c->running = false;
-//         return;
-//     }
-//
-//     ins.fn(c, ins.mode);
-//
-//     c->cycles += opcode_cycles[opcode];
-// }
 
 
 void run_cycles(CPU6502* c, int cycles)
@@ -1764,12 +1763,20 @@ void run_cycles(CPU6502* c, int cycles)
             return;
         }
 
-        uint8_t cost = opcode_cycles[opcode];
+        // 1. addressing mode
+        Operand op = resolve_operand(c, ins.mode);
 
-        ins.fn(c, ins.mode);
+        // 2. base cycles
+        int used = ins.base_cycles;
 
-        c->cycles_left -= cost;
-        c->cycles += cost;
+        // 3. execute instruction
+        ins.fn(c, op);
+
+        // 4. add addressing penalty
+        /* used += op.extra_cycles; */
+
+        c->cycles_left -= used;
+        c->cycles += used;
     }
 }
 
@@ -1806,10 +1813,6 @@ int main(void) {
 
   cpu.running = true;
 
-  // run
-  // while (cpu.running) {
-  //   step(&cpu);
-  // }
   run_cycles(&cpu, 100000);
 
   printf("A = %u\n", cpu.a);
