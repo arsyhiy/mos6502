@@ -10,15 +10,9 @@ GPU_SRC = gpu.c
 FONT_SRC = font.c
 SDL_SRC = main_sdl.c
 
-# =========================
-# CPU BUILD (no SDL)
-# =========================
 all:
 	$(CC) $(CFLAGS) $(SRC) -o $(TARGET)
 
-# =========================
-# SDL BUILD (window emulator)
-# =========================
 sdl:
 	$(CC) $(CFLAGS) \
 		$(SRC) \
@@ -28,15 +22,9 @@ sdl:
 		-o emu \
 		$(SDL_FLAGS)
 
-# =========================
-# CLEAN
-# =========================
 clean:
 	rm -f $(TARGET) emu test_runner
 
-# =========================
-# TESTS
-# =========================
 test:
 	$(CC) $(CFLAGS) \
 		tests/test_cpu.c \
@@ -48,9 +36,6 @@ test:
 
 	./test_runner
 
-# =========================
-# RUN CPU ONLY
-# =========================
 run: all
 	./$(TARGET)
 

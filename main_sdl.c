@@ -32,9 +32,6 @@ int main()
 
     cpu_init(&cpu, &mem, &gpu);
 
-    // =====================================
-    // TEST TERMINAL OUTPUT
-    // =====================================
 
     term_print(&mem, 0, 0, "MOS 6502 TERMINAL");
     term_print(&mem, 0, 2, "HELLO WORLD");
@@ -47,9 +44,6 @@ int main()
 
     cpu_reset(&cpu);
 
-    // =====================================
-    // SDL
-    // =====================================
 
     SDL_Init(SDL_INIT_VIDEO);
 
@@ -74,9 +68,6 @@ int main()
             SCREEN_H
         );
 
-    // =====================================
-    // MAIN LOOP
-    // =====================================
 
     while (cpu.running)
     {
@@ -113,9 +104,6 @@ int main()
         SDL_Delay(16);
     }
 
-    // =====================================
-    // CLEANUP
-    // =====================================
 
     SDL_DestroyTexture(tex);
     SDL_DestroyRenderer(ren);

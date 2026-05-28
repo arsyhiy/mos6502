@@ -43,5 +43,4 @@ void gpu_tick(GPU *g, uint8_t *mem)
             }
         }
     }
-
 }
