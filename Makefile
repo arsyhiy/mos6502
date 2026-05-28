@@ -1,17 +1,57 @@
 CC = clang
+CFLAGS = -Wall -Wextra -O2
+
+SDL_FLAGS = $(shell sdl2-config --cflags --libs)
+
 TARGET = cpu
+
 SRC = mos6502.c
+GPU_SRC = gpu.c
+FONT_SRC = font.c
+SDL_SRC = main_sdl.c
 
+# =========================
+# CPU BUILD (no SDL)
+# =========================
 all:
-	$(CC) $(SRC) -o $(TARGET)
+	$(CC) $(CFLAGS) $(SRC) -o $(TARGET)
 
-clear:
-	rm -f $(TARGET)
+# =========================
+# SDL BUILD (window emulator)
+# =========================
+sdl:
+	$(CC) $(CFLAGS) \
+		$(SRC) \
+		$(GPU_SRC) \
+		$(FONT_SRC) \
+		$(SDL_SRC) \
+		-o emu \
+		$(SDL_FLAGS)
 
-test: 
-	gcc tests/test_cpu.c cpu/cpu.c libs/Unity/src/unity.c \
-	-Ilibs/Unity/src -Icpu \
-	-o test_runner
+# =========================
+# CLEAN
+# =========================
+clean:
+	rm -f $(TARGET) emu test_runner
 
+# =========================
+# TESTS
+# =========================
+test:
+	$(CC) $(CFLAGS) \
+		tests/test_cpu.c \
+		mos6502.c \
+		libs/Unity/src/unity.c \
+		-Ilibs/Unity/src \
+		-I. \
+		-o test_runner
 
-.PHONY: all clean
+	./test_runner
+
+# =========================
+# RUN CPU ONLY
+# =========================
+run: all
+	./$(TARGET)
+
+.PHONY: all clean test run sdl

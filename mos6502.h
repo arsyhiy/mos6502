@@ -1,86 +1,94 @@
-#ifndef EMULATOR_H
-#define EMULATOR_H
+#ifndef MOS6502_H
+#define MOS6502_H
 
 #include <stdint.h>
-#include <stddef.h>
 #include <stdbool.h>
 
-#ifdef __cplusplus
-extern "C" {
-#endif
+#define MEM_SIZE 0x10000
 
-/* =========================
-   MEMORY
-========================= */
+#define SCREEN_W 256
+#define SCREEN_H 240
 
+// =========================
+// FLAGS
+// =========================
+typedef enum {
+    FLAG_C = 0,
+    FLAG_Z,
+    FLAG_I,
+    FLAG_D,
+    FLAG_B,
+    FLAG_U,
+    FLAG_V,
+    FLAG_N
+} Flag;
+
+// =========================
+// ADDRESS MODES
+// =========================
+typedef enum {
+    IMM, ZP, ABS, IND,
+    ZPX, ZPY, ABX, ABY,
+    IMP, IZX, IZY, REL, ACC
+} AddrMode;
+
+// =========================
+// MEMORY
+// =========================
 typedef struct {
-    uint8_t data[0x10000];
+    uint8_t data[MEM_SIZE];
 } Memory;
 
-/* =========================
-   CPU
-========================= */
+typedef struct CPU6502 CPU6502;
+typedef struct GPU GPU;   // 👈 forward declaration (OK)
 
+// =========================
+// OPERAND
+// =========================
+typedef struct {
+    uint16_t addr;
+    uint8_t value;
+} Operand;
+
+// =========================
+// INSTRUCTION FUNCTION
+// =========================
+typedef void (*InstrFn)(CPU6502 *, Operand);
+
+// =========================
+// OPCODE
+// =========================
+typedef struct {
+    InstrFn fn;
+    AddrMode mode;
+    uint8_t cycles;
+} Opcode;
+
+// =========================
+// CPU
+// =========================
 typedef struct CPU6502 {
-
-    Memory* mem;
-
-    uint8_t a;
-    uint8_t x;
-    uint8_t y;
-
-    uint16_t pc;
+    uint8_t a, x, y;
     uint8_t sp;
-
     uint8_t status;
+    uint16_t pc;
 
-    bool running;
+    GPU *gpu;
+
     uint64_t cycles;
+    bool running;
 
-    void (*op[256])(struct CPU6502*);
+    Memory *mem;
+    Opcode op[256];
 
+    uint8_t cycles_left;
 } CPU6502;
 
-/* =========================
-   MEMORY API
-========================= */
-
-void mem_write(Memory* mem, uint16_t addr, uint8_t value);
-
-uint8_t mem_read(
-    Memory* mem,
-    uint16_t addr
-);
-
-void mem_load(
-    Memory* mem,
-    uint16_t addr,
-    const uint8_t* blob,
-    size_t size
-);
-
-/* =========================
-   CPU LIFECYCLE
-========================= */
-
-CPU6502* cpu_create(Memory* mem);
-
-void cpu_destroy(CPU6502* cpu);
-
-void cpu_reset(CPU6502* cpu);
-
-void cpu_run(CPU6502* cpu);
-
-void cpu_step(CPU6502* cpu);
-
-/* =========================
-   INTERNAL INIT
-========================= */
-
-void init_opcodes(CPU6502* cpu);
-
-#ifdef __cplusplus
-}
-#endif
+// =========================
+// API
+// =========================
+void cpu_init(CPU6502 *cpu, Memory *mem, GPU *gpu);
+void cpu_reset(CPU6502 *cpu);
+void cpu_run(CPU6502 *cpu, int cycles);
 
 #endif

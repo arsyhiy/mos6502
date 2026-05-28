@@ -1,80 +1,10 @@
 /* mos6502.c: a library implementing a fully functional MOS 6502 CPU in C */
 
-#include <stdbool.h>
-#include <stdint.h>
+#include "mos6502.h"
+#include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <string.h>
 
-
-// flags
-typedef enum {
-  FLAG_C = 0,
-  FLAG_Z,
-  FLAG_I,
-  FLAG_D,
-  FLAG_B,
-  FLAG_U,
-  FLAG_V,
-  FLAG_N
-} Flag;
-
-// addreses modes
-typedef enum {
-  IMM,
-  ZP,
-  ABS,
-  IND,
-  ZPX,
-  ZPY,
-  ABX,
-  ABY,
-  IMP,
-  IZX,
-  IZY,
-  REL,
-  ACC
-} AddrMode;
-
-// memory
-#define MEM_SIZE 0x10000 // 64 KB of addressable memory
-typedef struct {
-  uint8_t data[MEM_SIZE];
-} Memory;
-
-typedef struct CPU6502 CPU6502;
-
-// operand
-typedef struct {
-    uint16_t addr;
-    uint8_t value;
-} Operand;
-
-typedef void (*InstrFn)(CPU6502 *, Operand);
-
-// op code
-typedef struct {
-    InstrFn fn;
-    AddrMode mode;
-    uint8_t base_cycles;
-} Opcode;
-
-// cpu
-struct CPU6502 {
-  uint8_t a, x, y;
-  uint8_t sp;
-  uint8_t status;
-  uint16_t pc;
-
-  uint64_t cycles;
-  bool running;
-
-  Memory *mem;
-  Opcode op[256];
-
-
-  uint8_t cycles_left;
-};
 
 // =========================
 // MEMORY ACCESS
@@ -227,1278 +157,714 @@ static Operand resolve_operand(CPU6502 *c, AddrMode mode)
 
     return op;
 }
-
 // =========================
 // LOAD / STORE
 // =========================
 
-
-
-static void LDY(CPU6502 *c, Operand op) {
-  c->y = op.value;
-  update_zn(c, c->y);
+// Load accumulator
+static void LDA(CPU6502 *c, Operand op)
+{
+    c->a = op.value;
+    update_zn(c, c->a);
 }
 
+// Load X register
+static void LDX(CPU6502 *c, Operand op)
+{
+    c->x = op.value;
+    update_zn(c, c->x);
+}
+
+// Load Y register
+static void LDY(CPU6502 *c, Operand op)
+{
+    c->y = op.value;
+    update_zn(c, c->y);
+}
+
+// Store accumulator
+static void STA(CPU6502 *c, Operand op)
+{
+    mem_write(c->mem, op.addr, c->a);
+}
+
+
+// Store X register
+static void STX(CPU6502 *c, Operand op)
+{
+    mem_write(c->mem, op.addr, c->x);
+}
+
+// Store Y register
+static void STY(CPU6502 *c, Operand op)
+{
+    mem_write(c->mem, op.addr, c->y);
+}
 
 // =========================
-// TRANSFERS
+// TRANSFER
 // =========================
 
-static void TAX(CPU6502 *c, Operand op) {
-  (void)op;
-  c->x = c->a;
-  update_zn(c, c->x);
+// A -> X
+static void TAX(CPU6502 *c, Operand op)
+{
+    (void)op;
+
+    c->x = c->a;
+    update_zn(c, c->x);
 }
 
-static void TAY(CPU6502 *c, Operand op) {
-  (void)op;
-  c->y = c->a;
-  update_zn(c, c->y);
+// A -> Y
+static void TAY(CPU6502 *c, Operand op)
+{
+    (void)op;
+
+    c->y = c->a;
+    update_zn(c, c->y);
 }
 
-static void TXA(CPU6502 *c, Operand op) {
-  (void)op;
-  c->a = c->x;
-  update_zn(c, c->a);
+// SP -> X
+static void TSX(CPU6502 *c, Operand op)
+{
+    (void)op;
+
+    c->x = c->sp;
+    update_zn(c, c->x);
 }
 
-static void TYA(CPU6502 *c, Operand op) {
-  (void)op;
-  c->a = c->y;
-  update_zn(c, c->a);
+// X -> A
+static void TXA(CPU6502 *c, Operand op)
+{
+    (void)op;
+
+    c->a = c->x;
+    update_zn(c, c->a);
+}
+
+// X -> SP
+static void TXS(CPU6502 *c, Operand op)
+{
+    (void)op;
+
+    c->sp = c->x;
+}
+
+// Y -> A
+static void TYA(CPU6502 *c, Operand op)
+{
+    (void)op;
+
+    c->a = c->y;
+    update_zn(c, c->a);
+}
+// =========================
+// STACK
+// =========================
+
+// Push accumulator
+static void PHA(CPU6502 *c, Operand op)
+{
+    (void)op;
+
+    push(c, c->a);
+}
+
+// Push processor status
+static void PHP(CPU6502 *c, Operand op)
+{
+    (void)op;
+
+    push(
+        c,
+        c->status |
+        (1 << FLAG_B) |
+        (1 << FLAG_U)
+    );
+}
+
+// Pull accumulator
+static void PLA(CPU6502 *c, Operand op)
+{
+    (void)op;
+
+    c->a = pop(c);
+
+    update_zn(c, c->a);
+}
+
+// Pull processor status
+static void PLP(CPU6502 *c, Operand op)
+{
+    (void)op;
+
+    c->status = pop(c);
+
+    // unused flag is always set
+    c->status |= (1 << FLAG_U);
+}
+
+// =========================
+// INCREMENTS / DECREMENTS
+// =========================
+
+// Decrement memory
+static void DEC(CPU6502 *c, Operand op)
+{
+    uint8_t value = op.value - 1;
+
+    mem_write(c->mem, op.addr, value);
+
+    update_zn(c, value);
+}
+
+// Decrement X
+static void DEX(CPU6502 *c, Operand op)
+{
+    (void)op;
+
+    c->x--;
+
+    update_zn(c, c->x);
+}
+
+// Decrement Y
+static void DEY(CPU6502 *c, Operand op)
+{
+    (void)op;
+
+    c->y--;
+
+    update_zn(c, c->y);
+}
+
+// Increment memory
+static void INC(CPU6502 *c, Operand op)
+{
+    uint8_t value = op.value + 1;
+
+    mem_write(c->mem, op.addr, value);
+
+    update_zn(c, value);
+}
+
+// Increment X
+static void INX(CPU6502 *c, Operand op)
+{
+    (void)op;
+
+    c->x++;
+
+    update_zn(c, c->x);
+}
+
+// Increment Y
+static void INY(CPU6502 *c, Operand op)
+{
+    (void)op;
+
+    c->y++;
+
+    update_zn(c, c->y);
 }
 
 // =========================
 // ARITHMETIC
 // =========================
 
-static void ADC(CPU6502 *c, Operand op) {
-  uint16_t r = c->a + op.value + (c->status & FLAG_C);
+static bool get_flag(CPU6502 *c, Flag f)
+{
+    return (c->status & (1 << f)) != 0;
+}
 
-  set_flag(c, FLAG_C, r > 0xFF);
-  c->a = r & 0xFF;
-  update_zn(c, c->a);
+// Add with carry
+static void ADC(CPU6502 *c, Operand op)
+{
+    uint16_t result =
+        c->a +
+        op.value +
+        get_flag(c, FLAG_C);
+
+    // Carry flag
+    set_flag(c, FLAG_C, result > 0xFF);
+
+    // Overflow flag
+    set_flag(
+        c,
+        FLAG_V,
+        (~(c->a ^ op.value) &
+         (c->a ^ result) &
+         0x80)
+    );
+
+    // Store result
+    c->a = result & 0xFF;
+
+    // Update Z/N flags
+    update_zn(c, c->a);
+}
+
+// Subtract with carry
+static void SBC(CPU6502 *c, Operand op)
+{
+    uint8_t value = op.value ^ 0xFF;
+
+    uint16_t result =
+        c->a +
+        value +
+        get_flag(c, FLAG_C);
+
+    // Carry flag
+    set_flag(c, FLAG_C, result > 0xFF);
+
+    // Overflow flag
+    set_flag(
+        c,
+        FLAG_V,
+        (~(c->a ^ value) &
+         (c->a ^ result) &
+         0x80)
+    );
+
+    // Store result
+    c->a = result & 0xFF;
+
+    // Update Z/N flags
+    update_zn(c, c->a);
 }
 
 // =========================
-// BRANCH
+// LOGICAL
 // =========================
 
-static void BEQ(CPU6502 *c, Operand op) {
-  if (c->status & FLAG_Z)
-    c->pc += (int8_t)op.value;
+// AND
+// A = A & M
+static void AND(CPU6502 *c, Operand op)
+{
+    c->a &= op.value;
+
+    update_zn(c, c->a);
 }
 
-static void BNE(CPU6502 *c, Operand op) {
-  if (!(c->status & FLAG_Z))
-    c->pc += (int8_t)op.value;
+// EOR (XOR)
+// A = A ^ M
+static void EOR(CPU6502 *c, Operand op)
+{
+    c->a ^= op.value;
+
+    update_zn(c, c->a);
+}
+
+// ORA (OR)
+// A = A | M
+static void ORA(CPU6502 *c, Operand op)
+{
+    c->a |= op.value;
+
+    update_zn(c, c->a);
 }
 
 // =========================
-// JUMP
+// SHIFT / ROTATE
 // =========================
 
-static void JMP(CPU6502 *c, Operand op) {
-  c->pc = op.addr;
+// Arithmetic shift left
+static void ASL(CPU6502 *c, Operand op)
+{
+    uint8_t value = op.value;
+
+    set_flag(c, FLAG_C, value & 0x80);
+
+    value <<= 1;
+
+    mem_write(c->mem, op.addr, value);
+
+    update_zn(c, value);
+}
+
+// Arithmetic shift left (accumulator)
+static void ASL_A(CPU6502 *c, Operand op)
+{
+    (void)op;
+
+    set_flag(c, FLAG_C, c->a & 0x80);
+
+    c->a <<= 1;
+
+    update_zn(c, c->a);
+}
+
+// Logical shift right
+static void LSR(CPU6502 *c, Operand op)
+{
+    uint8_t value = op.value;
+
+    set_flag(c, FLAG_C, value & 0x01);
+
+    value >>= 1;
+
+    mem_write(c->mem, op.addr, value);
+
+    update_zn(c, value);
+}
+
+// Logical shift right (accumulator)
+static void LSR_A(CPU6502 *c, Operand op)
+{
+    (void)op;
+
+    set_flag(c, FLAG_C, c->a & 0x01);
+
+    c->a >>= 1;
+
+    update_zn(c, c->a);
+}
+
+// Rotate left
+static void ROL(CPU6502 *c, Operand op)
+{
+    uint8_t value = op.value;
+
+    uint8_t old_carry = get_flag(c, FLAG_C);
+
+    set_flag(c, FLAG_C, value & 0x80);
+
+    value = (value << 1) | old_carry;
+
+    mem_write(c->mem, op.addr, value);
+
+    update_zn(c, value);
+}
+
+// Rotate left (accumulator)
+static void ROL_A(CPU6502 *c, Operand op)
+{
+    (void)op;
+
+    uint8_t old_carry = get_flag(c, FLAG_C);
+
+    set_flag(c, FLAG_C, c->a & 0x80);
+
+    c->a = (c->a << 1) | old_carry;
+
+    update_zn(c, c->a);
+}
+
+// Rotate right
+static void ROR(CPU6502 *c, Operand op)
+{
+    uint8_t value = op.value;
+
+    uint8_t old_carry = get_flag(c, FLAG_C);
+
+    set_flag(c, FLAG_C, value & 0x01);
+
+    value = (value >> 1) | (old_carry << 7);
+
+    mem_write(c->mem, op.addr, value);
+
+    update_zn(c, value);
+}
+
+// Rotate right (accumulator)
+static void ROR_A(CPU6502 *c, Operand op)
+{
+    (void)op;
+
+    uint8_t old_carry = get_flag(c, FLAG_C);
+
+    set_flag(c, FLAG_C, c->a & 0x01);
+
+    c->a = (c->a >> 1) | (old_carry << 7);
+
+    update_zn(c, c->a);
 }
 
 // =========================
-// SYSTEM
+// FLAGS
 // =========================
 
-static void NOP(CPU6502 *c, Operand op) {
-  (void)c;
-  (void)op;
+// Clear carry flag
+static void CLC(CPU6502 *c, Operand op)
+{
+    (void)op;
+
+    set_flag(c, FLAG_C, false);
 }
 
-static void BRK(CPU6502 *c, Operand op) {
-  (void)op;
-  c->running = false;
+// Clear decimal flag
+static void CLD(CPU6502 *c, Operand op)
+{
+    (void)op;
+
+    set_flag(c, FLAG_D, false);
 }
 
+// Clear interrupt disable flag
+static void CLI(CPU6502 *c, Operand op)
+{
+    (void)op;
 
+    set_flag(c, FLAG_I, false);
+}
 
+// Clear overflow flag
+static void CLV(CPU6502 *c, Operand op)
+{
+    (void)op;
 
-// there will go all instructions need to rewrite that's why they will be
-// commented
+    set_flag(c, FLAG_V, false);
+}
 
-//   there  i will describe all instructions
+// Set carry flag
+static void SEC(CPU6502 *c, Operand op)
+{
+    (void)op;
+
+    set_flag(c, FLAG_C, true);
+}
+
+// Set decimal flag
+static void SED(CPU6502 *c, Operand op)
+{
+    (void)op;
+
+    set_flag(c, FLAG_D, true);
+}
+
+// Set interrupt disable flag
+static void SEI(CPU6502 *c, Operand op)
+{
+    (void)op;
+
+    set_flag(c, FLAG_I, true);
+}
 
 // =========================
-// Transfer Instructions
+// COMPARISON
 // =========================
 
+static void update_cmp_flags(
+    CPU6502 *c,
+    uint8_t reg,
+    uint8_t value
+)
+{
+    uint16_t result = (uint16_t)reg - value;
 
-static void LDA(CPU6502 *c, Operand op) {
-  // load accumulator
-  c->a = op.value;
-  update_zn(c, c->a);
+    set_flag(c, FLAG_C, reg >= value);
+    set_flag(c, FLAG_Z, reg == value);
+    set_flag(c, FLAG_N, result & 0x80);
 }
 
-static void LDX(CPU6502 *c, Operand op) {
-  // Load X
-  c->x = op.value;
-  update_zn(c, c->x);
+// Compare accumulator
+static void CMP(CPU6502 *c, Operand op)
+{
+    update_cmp_flags(
+        c,
+        c->a,
+        op.value
+    );
 }
 
-
-// // Load Y
-//
-// void LDY(
-//     CPU6502* cpu,
-//     uint16_t addr
-// ){
-//     cpu->y =
-//         mem_read(
-//             cpu->mem,
-//             addr
-//         );
-//
-//     update_zn(
-//         cpu,
-//         cpu->y
-//     );
-// }
-//
-//
-
-
-
-static void STA(CPU6502 *c, Operand op) {
-  // Store Accumulator
-  mem_write(c->mem, op.addr, c->a);
+// Compare X register
+static void CPX(CPU6502 *c, Operand op)
+{
+    update_cmp_flags(
+        c,
+        c->x,
+        op.value
+    );
 }
 
+// Compare Y register
+static void CPY(CPU6502 *c, Operand op)
+{
+    update_cmp_flags(
+        c,
+        c->y,
+        op.value
+    );
+}
+// =========================
+// BIT
+// =========================
 
-//
-// // Store X
-//
-// void STX(
-//     CPU6502* cpu,
-//     uint16_t addr
-// ){
-//     mem_write(
-//         cpu->mem,
-//         addr,
-//         cpu->x
-//     );
-// }
-//
-//
-// // Store Y
-//
-// void STY(
-//     CPU6502* cpu,
-//     uint16_t addr
-// ){
-//     mem_write(
-//         cpu->mem,
-//         addr,
-//         cpu->y
-//     );
-// }
-//
-//
-// // Transfer A → X
-//
-// void TAX(
-//     CPU6502* cpu
-// ){
-//     cpu->x =
-//         cpu->a;
-//
-//     update_zn(
-//         cpu,
-//         cpu->x
-//     );
-// }
-//
-//
-// // Transfer A → Y
-//
-// void TAY(
-//     CPU6502* cpu
-// ){
-//     cpu->y =
-//         cpu->a;
-//
-//     update_zn(
-//         cpu,
-//         cpu->y
-//     );
-// }
-//
-//
-// // Transfer SP → X
-//
-// void TSX(
-//     CPU6502* cpu
-// ){
-//     cpu->x =
-//         cpu->sp;
-//
-//     update_zn(
-//         cpu,
-//         cpu->x
-//     );
-// }
-//
-//
-// // Transfer X → A
-//
-// void TXA(
-//     CPU6502* cpu
-// ){
-//     cpu->a =
-//         cpu->x;
-//
-//     update_zn(
-//         cpu,
-//         cpu->a
-//     );
-// }
-//
-//
-// // Transfer X → SP
-//
-// void TXS(
-//     CPU6502* cpu
-// ){
-//     cpu->sp =
-//         cpu->x;
-// }
-//
-//
-// // Transfer Y → A
-//
-// void TYA(
-//     CPU6502* cpu
-// ){
-//     cpu->a =
-//         cpu->y;
-//
-//     update_zn(
-//         cpu,
-//         cpu->a
-//     );
-// }
-//
-// // =========================
-// // Stack Instructions
-// // =========================
-//
-// /* static void update_zn( */
-// /*     CPU6502* cpu, */
-// /*     uint8_t value */
-// /* ){ */
-// /*     set_flag( */
-// /*         cpu, */
-// /*         Z, */
-// /*         value == 0 */
-// /*     ); */
-//
-// /*     set_flag( */
-// /*         cpu, */
-// /*         N, */
-// /*         value & 0x80 */
-// /*     ); */
-// /* } */
-//
-//
-// // Push Accumulator
-//
-// void PHA(
-//     CPU6502* cpu
-// ){
-//     push(
-//         cpu,
-//         cpu->a
-//     );
-// }
-//
-//
-// // Push Processor Status
-//
-// void PHP(
-//     CPU6502* cpu
-// ){
-//     push(
-//         cpu,
-//         cpu->status
-//         |
-//         (1 << B)
-//         |
-//         (1 << U)
-//     );
-// }
-//
-//
-// // Pull Accumulator
-//
-// void PLA(
-//     CPU6502* cpu
-// ){
-//     cpu->a =
-//         pop(
-//             cpu
-//         );
-//
-//     update_zn(
-//         cpu,
-//         cpu->a
-//     );
-// }
-//
-//
-// // Pull Processor Status
-//
-// void PLP(
-//     CPU6502* cpu
-// ){
-//     cpu->status =
-//         pop(
-//             cpu
-//         );
-//
-//     cpu->status |=
-//         (1 << U);
-// }
-//
-//
-// // =========================
-// // Decrements & Increments
-// // =========================
-//
-// /* static void update_zn( */
-// /*     CPU6502* cpu, */
-// /*     uint8_t value */
-// /* ){ */
-// /*     set_flag( */
-// /*         cpu, */
-// /*         Z, */
-// /*         value == 0 */
-// /*     ); */
-//
-// /*     set_flag( */
-// /*         cpu, */
-// /*         N, */
-// /*         value & 0x80 */
-// /*     ); */
-// /* } */
-//
-//
-// // Decrement Memory
-//
-// void DEC(
-//     CPU6502* cpu,
-//     uint16_t addr
-// ){
-//     uint8_t value =
-//         mem_read(
-//             cpu->mem,
-//             addr
-//         );
-//
-//     value--;
-//
-//     mem_write(
-//         cpu->mem,
-//         addr,
-//         value
-//     );
-//
-//     update_zn(
-//         cpu,
-//         value
-//     );
-// }
-//
-//
-// // Decrement X
-//
-// void DEX(
-//     CPU6502* cpu
-// ){
-//     cpu->x--;
-//
-//     update_zn(
-//         cpu,
-//         cpu->x
-//     );
-// }
-//
-//
-// // Decrement Y
-//
-// void DEY(
-//     CPU6502* cpu
-// ){
-//     cpu->y--;
-//
-//     update_zn(
-//         cpu,
-//         cpu->y
-//     );
-// }
-//
-//
-// // Increment Memory
-//
-// void INC(
-//     CPU6502* cpu,
-//     uint16_t addr
-// ){
-//     uint8_t value =
-//         mem_read(
-//             cpu->mem,
-//             addr
-//         );
-//
-//     value++;
-//
-//     mem_write(
-//         cpu->mem,
-//         addr,
-//         value
-//     );
-//
-//     update_zn(
-//         cpu,
-//         value
-//     );
-// }
-//
-//
-// // Increment X
-//
-// void INX(
-//     CPU6502* cpu
-// ){
-//     cpu->x++;
-//
-//     update_zn(
-//         cpu,
-//         cpu->x
-//     );
-// }
-//
-//
-// // Increment Y
-//
-// void INY(
-//     CPU6502* cpu
-// ){
-//     cpu->y++;
-//
-//     update_zn(
-//         cpu,
-//         cpu->y
-//     );
-// }
-//
-//
-//
-// // =========================
-// // Arithmetic Operations
-// // =========================
-//
-// /* static void update_zn( */
-// /*     CPU6502* cpu, */
-// /*     uint8_t value */
-// /* ){ */
-// /*     set_flag( */
-// /*         cpu, */
-// /*         Z, */
-// /*         value == 0 */
-// /*     ); */
-//
-// /*     set_flag( */
-// /*         cpu, */
-// /*         N, */
-// /*         value & 0x80 */
-// /*     ); */
-// /* } */
-//
-//
-// // Add With Carry
-//
-// void ADC(
-//     CPU6502* cpu,
-//     uint16_t addr
-// ){
-//
-//     uint8_t value =
-//         mem_read(
-//             cpu->mem,
-//             addr
-//         );
-//
-//     uint8_t carry =
-//         (
-//             cpu->status
-//             &
-//             (1 << C)
-//         )
-//         ? 1
-//         : 0;
-//
-//     uint16_t result =
-//         cpu->a
-//         +
-//         value
-//         +
-//         carry;
-//
-//     set_flag(
-//         cpu,
-//         C,
-//         result > 0xFF
-//     );
-//
-//     set_flag(
-//         cpu,
-//         V,
-//         (
-//             ~(
-//                 cpu->a
-//                 ^
-//                 value
-//             )
-//             &
-//             (
-//                 cpu->a
-//                 ^
-//                 result
-//             )
-//             &
-//             0x80
-//         )
-//     );
-//
-//     cpu->a =
-//         result
-//         &
-//         0xFF;
-//
-//     update_zn(
-//         cpu,
-//         cpu->a
-//     );
-// }
-//
-//
-// /* void ADC( */
-// /*     CPU6502* cpu, */
-// /*     uint16_t addr */
-// /* ){ */
-// /*     uint8_t value = */
-// /*         mem_read( */
-// /*             cpu->mem, */
-// /*             addr */
-// /*         ); */
-//
-// /*     uint8_t carry = */
-// /*         (cpu->status & (1 << FLAG_C)) */
-// /*         ? 1 */
-// /*         : 0; */
-//
-// /*     // ========================= */
-// /*     // DECIMAL MODE (BCD) */
-// /*     // ========================= */
-// /*     if (cpu->status & (1 << FLAG_D)) */
-// /*     { */
-// /*         uint8_t lo = */
-// /*             (cpu->a & 0x0F) */
-// /*             + (value & 0x0F) */
-// /*             + carry; */
-//
-// /*         uint8_t hi = */
-// /*             (cpu->a >> 4) */
-// /*             + (value >> 4); */
-//
-// /*         if (lo > 9) */
-// /*         { */
-// /*             lo -= 10; */
-// /*             hi++; */
-// /*         } */
-//
-// /*         set_flag(cpu, FLAG_C, hi > 9); */
-//
-// /*         cpu->a = */
-// /*             ((hi % 10) << 4) */
-// /*             | (lo & 0x0F); */
-//
-// /*         update_zn(cpu, cpu->a); */
-// /*         return; */
-// /*     } */
-//
-// /*     // ========================= */
-// /*     // BINARY MODE (NORMAL 6502) */
-// /*     // ========================= */
-// /*     uint16_t result = */
-// /*         cpu->a */
-// /*         + value */
-// /*         + carry; */
-//
-// /*     set_flag( */
-// /*         cpu, */
-// /*         FLAG_C, */
-// /*         result > 0xFF */
-// /*     ); */
-//
-// /*     set_flag( */
-// /*         cpu, */
-// /*         FLAG_V, */
-// /*         (~(cpu->a ^ value) & (cpu->a ^ result) & 0x80) */
-// /*     ); */
-//
-// /*     cpu->a = result & 0xFF; */
-//
-// /*     update_zn(cpu, cpu->a); */
-// /* } */
-//
-//
-// // Subtract With Carry
-//
-// void SBC(
-//     CPU6502* cpu,
-//     uint16_t addr
-// ){
-//
-//     uint8_t value =
-//         mem_read(
-//             cpu->mem,
-//             addr
-//         );
-//
-//     value ^= 0xFF;
-//
-//     uint8_t carry =
-//         (
-//             cpu->status
-//             &
-//             (1 << C)
-//         )
-//         ? 1
-//         : 0;
-//
-//     uint16_t result =
-//         cpu->a
-//         +
-//         value
-//         +
-//         carry;
-//
-//     set_flag(
-//         cpu,
-//         C,
-//         result > 0xFF
-//     );
-//
-//     set_flag(
-//         cpu,
-//         V,
-//         (
-//             ~(
-//                 cpu->a
-//                 ^
-//                 value
-//             )
-//             &
-//             (
-//                 cpu->a
-//                 ^
-//                 result
-//             )
-//             &
-//             0x80
-//         )
-//     );
-//
-//     cpu->a =
-//         result
-//         &
-//         0xFF;
-//
-//     update_zn(
-//         cpu,
-//         cpu->a
-//     );
-// }
-//
-//
-// // =========================
-// // Logical Operations
-// // =========================
-//
-// /* static void update_zn( */
-// /*     CPU6502* cpu, */
-// /*     uint8_t value */
-// /* ){ */
-// /*     set_flag( */
-// /*         cpu, */
-// /*         Z, */
-// /*         value == 0 */
-// /*     ); */
-//
-// /*     set_flag( */
-// /*         cpu, */
-// /*         N, */
-// /*         value & 0x80 */
-// /*     ); */
-// /* } */
-//
-//
-// // AND
-// // A = A & M
-//
-// void AND(
-//     CPU6502* cpu,
-//     uint16_t addr
-// ){
-//
-//     cpu->a &=
-//         mem_read(
-//             cpu->mem,
-//             addr
-//         );
-//
-//     update_zn(
-//         cpu,
-//         cpu->a
-//     );
-// }
-//
-//
-// // EOR (XOR)
-// // A = A ^ M
-//
-// void EOR(
-//     CPU6502* cpu,
-//     uint16_t addr
-// ){
-//
-//     cpu->a ^=
-//         mem_read(
-//             cpu->mem,
-//             addr
-//         );
-//
-//     update_zn(
-//         cpu,
-//         cpu->a
-//     );
-// }
-//
-//
-// // ORA (OR)
-// // A = A | M
-//
-// void ORA(
-//     CPU6502* cpu,
-//     uint16_t addr
-// ){
-//
-//     cpu->a |=
-//         mem_read(
-//             cpu->mem,
-//             addr
-//         );
-//
-//     update_zn(
-//         cpu,
-//         cpu->a
-//     );
-// }
-//
-//
-//
-// /* static void update_zn(CPU6502* cpu, uint8_t v) */
-// /* { */
-// /*     set_flag(cpu, Z, v == 0); */
-// /*     set_flag(cpu, N, v & 0x80); */
-// /* } */
-//
-// // shift & rotate instructions
-// void ASL(CPU6502* cpu, uint16_t addr)
-// {
-//     uint8_t value = mem_read(cpu->mem, addr);
-//
-//     set_flag(cpu, C, value & 0x80);
-//
-//     value <<= 1;
-//
-//     mem_write(cpu->mem, addr, value);
-//
-//     update_zn(cpu, value);
-// }
-//
-//
-// /* void ASL(CPU6502* cpu, uint16_t addr) */
-// /* { */
-// /*     uint8_t value; */
-//
-// /*     if (addr == 0) // ACC mode */
-// /*         value = cpu->a; */
-// /*     else */
-// /*         value = read_mem(cpu, addr); */
-//
-// /*     set_flag(cpu, FLAG_C, value & 0x80); */
-//
-// /*     value <<= 1; */
-//
-// /*     if (addr == 0) */
-// /*         cpu->a = value; */
-// /*     else */
-// /*         write_mem(cpu, addr, value); */
-//
-// /*     update_zn(cpu, value); */
-// /* } */
-//
-//
-// void ASL_A(CPU6502* cpu)
-// {
-//     set_flag(cpu, C, cpu->a & 0x80);
-//
-//     cpu->a <<= 1;
-//
-//     update_zn(cpu, cpu->a);
-// }
-//
-// void LSR(CPU6502* cpu, uint16_t addr)
-// {
-//     uint8_t value = mem_read(cpu->mem, addr);
-//
-//     set_flag(cpu, C, value & 0x01);
-//
-//     value >>= 1;
-//
-//     mem_write(cpu->mem, addr, value);
-//
-//     update_zn(cpu, value);
-// }
-//
-// void LSR_A(CPU6502* cpu)
-// {
-//     set_flag(cpu, C, cpu->a & 0x01);
-//
-//     cpu->a >>= 1;
-//
-//     update_zn(cpu, cpu->a);
-// }
-//
-// void ROL(CPU6502* cpu, uint16_t addr)
-// {
-//     uint8_t value = mem_read(cpu->mem, addr);
-//
-//     uint8_t old_c = (cpu->status & (1 << C)) ? 1 : 0;
-//
-//     set_flag(cpu, C, value & 0x80);
-//
-//     value = (value << 1) | old_c;
-//
-//     mem_write(cpu->mem, addr, value);
-//
-//     update_zn(cpu, value);
-// }
-//
-// void ROL_A(CPU6502* cpu)
-// {
-//     uint8_t old_c = (cpu->status & (1 << C)) ? 1 : 0;
-//
-//     set_flag(cpu, C, cpu->a & 0x80);
-//
-//     cpu->a = (cpu->a << 1) | old_c;
-//
-//     update_zn(cpu, cpu->a);
-// }
-//
-// void ROR(CPU6502* cpu, uint16_t addr)
-// {
-//     uint8_t value = mem_read(cpu->mem, addr);
-//
-//     uint8_t old_c = (cpu->status & (1 << C)) ? 1 : 0;
-//
-//     set_flag(cpu, C, value & 0x01);
-//
-//     value = (value >> 1) | (old_c << 7);
-//
-//     mem_write(cpu->mem, addr, value);
-//
-//     update_zn(cpu, value);
-// }
-//
-// void ROR_A(CPU6502* cpu)
-// {
-//     uint8_t old_c = (cpu->status & (1 << C)) ? 1 : 0;
-//
-//     set_flag(cpu, C, cpu->a & 0x01);
-//
-//     cpu->a = (cpu->a >> 1) | (old_c << 7);
-//
-//     update_zn(cpu, cpu->a);
-// }
-//
-// // =========================
-// // Flag Instructions
-// // =========================
-//
-// void CLC(CPU6502* cpu)
-// {
-//     set_flag(cpu, C, false);
-// }
-//
-// void CLD(CPU6502* cpu)
-// {
-//     set_flag(cpu, D, false);
-// }
-//
-// void CLI(CPU6502* cpu)
-// {
-//     set_flag(cpu, I, false);
-// }
-//
-// void CLV(CPU6502* cpu)
-// {
-//     set_flag(cpu, V, false);
-// }
-//
-// void SEC(CPU6502* cpu)
-// {
-//     set_flag(cpu, C, true);
-// }
-//
-// void SED(CPU6502* cpu)
-// {
-//     set_flag(cpu, D, true);
-// }
-//
-// void SEI(CPU6502* cpu)
-// {
-//     set_flag(cpu, I, true);
-// }
-//
-//
-// // =========================
-// // Comparison Instructions
-// // =========================
-//
-// static void update_cmp_flags(
-//     CPU6502* cpu,
-//     uint8_t reg,
-//     uint8_t value
-// ){
-//     uint16_t result =
-//         (uint16_t)reg - value;
-//
-//     set_flag(cpu, C, reg >= value);
-//     set_flag(cpu, Z, reg == value);
-//     set_flag(cpu, N, result & 0x80);
-// }
-//
-//
-// // Compare A
-//
-// void CMP(
-//     CPU6502* cpu,
-//     uint16_t addr
-// ){
-//     uint8_t value =
-//         mem_read(cpu->mem, addr);
-//
-//     update_cmp_flags(
-//         cpu,
-//         cpu->a,
-//         value
-//     );
-// }
-//
-//
-// // Compare X
-//
-// void CPX(
-//     CPU6502* cpu,
-//     uint16_t addr
-// ){
-//     uint8_t value =
-//         mem_read(cpu->mem, addr);
-//
-//     update_cmp_flags(
-//         cpu,
-//         cpu->x,
-//         value
-//     );
-// }
-//
-//
-// // Compare Y
-//
-// void CPY(
-//     CPU6502* cpu,
-//     uint16_t addr
-// ){
-//     uint8_t value =
-//         mem_read(cpu->mem, addr);
-//
-//     update_cmp_flags(
-//         cpu,
-//         cpu->y,
-//         value
-//     );
-// }
-//
-// // =========================
-// // BIT Instruction
-// // =========================
-//
-// void BIT(
-//     CPU6502* cpu,
-//     uint16_t addr
-// ){
-//     uint8_t value =
-//         mem_read(cpu->mem, addr);
-//
-//     uint8_t result =
-//         cpu->a & value;
-//
-//     // Z flag: result == 0
-//     set_flag(cpu, Z, result == 0);
-//
-//     // N flag: bit 7 of memory
-//     set_flag(cpu, N, value & 0x80);
-//
-//     // V flag: bit 6 of memory
-//     set_flag(cpu, V, value & 0x40);
-// }
-//
-// // conditional branch instructions
-//
-// static void branch(
-//     CPU6502* cpu,
-//     bool condition
-// ){
-//     int8_t offset =
-//         (int8_t)mem_read(
-//             cpu->mem,
-//             cpu->pc++
-//         );
-//
-//     if (condition)
-//     {
-//         cpu->pc =
-//             cpu->pc + offset;
-//     }
-// }
-//
-//
-// void IRQ(CPU6502* cpu)
-// {
-//     if (cpu->status & (1 << FLAG_I))
-//         return;
-//
-//     push(cpu, (cpu->pc >> 8) & 0xFF);
-//     push(cpu, cpu->pc & 0xFF);
-//
-//     push(cpu, cpu->status);
-//
-//     set_flag(cpu, FLAG_I, true);
-//
-//     uint16_t lo = read_mem(cpu, 0xFFFE);
-//     uint16_t hi = read_mem(cpu, 0xFFFF);
-//
-//     cpu->pc = (hi << 8) | lo;
-// }
-//
-//
-// void NMI(CPU6502* cpu)
-// {
-//     push(cpu, (cpu->pc >> 8) & 0xFF);
-//     push(cpu, cpu->pc & 0xFF);
-//
-//     push(cpu, cpu->status);
-//
-//     set_flag(cpu, FLAG_I, true);
-//
-//     uint16_t lo = read_mem(cpu, 0xFFFA);
-//     uint16_t hi = read_mem(cpu, 0xFFFB);
-//
-//     cpu->pc = (hi << 8) | lo;
-// }
-//
-// /* static void branch(CPU6502* cpu, bool condition) */
-// /* { */
-// /*     int8_t offset = (int8_t)read_mem(cpu, cpu->pc++); */
-//
-// /*     if (condition) */
-// /*     { */
-// /*         uint16_t old_pc = cpu->pc; */
-// /*         cpu->pc = old_pc + offset; */
-// /*     } */
-// /* } */
-//
-//
-// // =========================
-// // Conditional Branches
-// // =========================
-//
-// void BCC(CPU6502* cpu)
-// {
-//     branch(
-//         cpu,
-//         !(cpu->status & (1 << C))
-//     );
-// }
-//
-// void BCS(CPU6502* cpu)
-// {
-//     branch(
-//         cpu,
-//         (cpu->status & (1 << C))
-//     );
-// }
-//
-// void BEQ(CPU6502* cpu)
-// {
-//     branch(
-//         cpu,
-//         (cpu->status & (1 << Z))
-//     );
-// }
-//
-// void BMI(CPU6502* cpu)
-// {
-//     branch(
-//         cpu,
-//         (cpu->status & (1 << N))
-//     );
-// }
-//
-// void BNE(CPU6502* cpu)
-// {
-//     branch(
-//         cpu,
-//         !(cpu->status & (1 << Z))
-//     );
-// }
-//
-// void BPL(CPU6502* cpu)
-// {
-//     branch(
-//         cpu,
-//         !(cpu->status & (1 << N))
-//     );
-// }
-//
-// void BVC(CPU6502* cpu)
-// {
-//     branch(
-//         cpu,
-//         !(cpu->status & (1 << V))
-//     );
-// }
-//
-// void BVS(CPU6502* cpu)
-// {
-//     branch(
-//         cpu,
-//         (cpu->status & (1 << V))
-//     );
-// }
-//
-//
-// // =========================
-// // Jumps & Subroutines
-// // =========================
-//
-//
-// // JMP (absolute)
-//
-// void JMP(
-//     CPU6502* cpu,
-//     uint16_t addr
-// ){
-//     cpu->pc = addr;
-// }
-//
-//
-// // JSR (Jump to Subroutine)
-//
-// void JSR(
-//     CPU6502* cpu,
-//     uint16_t addr
-// ){
-//     uint16_t return_addr =
-//         cpu->pc - 1;
-//
-//     // push high byte
-//     push(cpu, (return_addr >> 8) & 0xFF);
-//
-//     // push low byte
-//     push(cpu, return_addr & 0xFF);
-//
-//     cpu->pc = addr;
-// }
-//
-//
-// // RTS (Return from Subroutine)
-//
-// void RTS(
-//     CPU6502* cpu
-// ){
-//     uint8_t lo = pop(cpu);
-//     uint8_t hi = pop(cpu);
-//
-//     cpu->pc =
-//         ((hi << 8) | lo)
-//         + 1;
-// }
-// // =========================
-// // Interrupts
-// // =========================
-//
-// void BRK(
-//     CPU6502* cpu
-// ){
-//     cpu->pc++;
-//
-//     // push PC high
-//     push(cpu, (cpu->pc >> 8) & 0xFF);
-//
-//     // push PC low
-//     push(cpu, cpu->pc & 0xFF);
-//
-//     // push status with B + U set
-//     push(
-//         cpu,
-//         cpu->status
-//         | (1 << B)
-//         | (1 << U)
-//     );
-//
-//     // set interrupt disable
-//     set_flag(cpu, I, true);
-//
-//     // load interrupt vector
-//     uint16_t lo =
-//         mem_read(cpu->mem, 0xFFFE);
-//
-//     uint16_t hi =
-//         mem_read(cpu->mem, 0xFFFF);
-//
-//     cpu->pc =
-//         (hi << 8) | lo;
-// }
-//
-// // =========================
-// // Other Instructions
-// // =========================
-//
-// void NOP(
-//     CPU6502* cpu
-// ){
-//     // nothing happens
-// }
-//
+static void BIT(CPU6502 *c, Operand op)
+{
+    uint8_t result = c->a & op.value;
+
+    // Zero flag
+    set_flag(c, FLAG_Z, result == 0);
+
+    // Negative flag = bit 7
+    set_flag(c, FLAG_N, op.value & 0x80);
+
+    // Overflow flag = bit 6
+    set_flag(c, FLAG_V, op.value & 0x40);
+}
+
+// =========================
+// BRANCH HELPER
+// =========================
+
+static void branch(CPU6502 *c, bool condition, Operand op)
+{
+    if (condition) {
+        c->pc = op.addr;
+    }
+}
+
+// =========================
+// INTERRUPS
+// =========================
+
+static void IRQ(CPU6502 *c)
+{
+    if (c->status & (1 << FLAG_I))
+        return;
+
+    push(c, (c->pc >> 8) & 0xFF);
+    push(c, c->pc & 0xFF);
+
+    push(c, c->status);
+
+    set_flag(c, FLAG_I, true);
+
+    uint16_t lo = mem_read(c->mem, 0xFFFE);
+    uint16_t hi = mem_read(c->mem, 0xFFFF);
+
+    c->pc = (hi << 8) | lo;
+}
+
+static void NMI(CPU6502 *c)
+{
+    push(c, (c->pc >> 8) & 0xFF);
+    push(c, c->pc & 0xFF);
+
+    push(c, c->status);
+
+    set_flag(c, FLAG_I, true);
+
+    uint16_t lo = mem_read(c->mem, 0xFFFA);
+    uint16_t hi = mem_read(c->mem, 0xFFFB);
+
+    c->pc = (hi << 8) | lo;
+}
+
+// =========================
+// CONDITIONAL BRANCHES
+// =========================
+
+static void BCC(CPU6502 *c, Operand op)
+{
+    branch(c, !(c->status & (1 << FLAG_C)), op);
+}
+
+static void BCS(CPU6502 *c, Operand op)
+{
+    branch(c, (c->status & (1 << FLAG_C)), op);
+}
+
+static void BEQ(CPU6502 *c, Operand op)
+{
+    branch(c, (c->status & (1 << FLAG_Z)), op);
+}
+
+static void BMI(CPU6502 *c, Operand op)
+{
+    branch(c, (c->status & (1 << FLAG_N)), op);
+}
+
+static void BNE(CPU6502 *c, Operand op)
+{
+    branch(c, !(c->status & (1 << FLAG_Z)), op);
+}
+
+static void BPL(CPU6502 *c, Operand op)
+{
+    branch(c, !(c->status & (1 << FLAG_N)), op);
+}
+
+static void BVC(CPU6502 *c, Operand op)
+{
+    branch(c, !(c->status & (1 << FLAG_V)), op);
+}
+
+static void BVS(CPU6502 *c, Operand op)
+{
+    branch(c, (c->status & (1 << FLAG_V)), op);
+}
+
+// =========================
+// JUMPS & SUBROUTINES
+// =========================
+
+// JMP (absolute or indirect handled via operand.addr in dispatcher)
+static void JMP(CPU6502 *c, Operand op)
+{
+    c->pc = op.addr;
+}
+
+// JSR (Jump to Subroutine)
+static void JSR(CPU6502 *c, Operand op)
+{
+    uint16_t return_addr = c->pc - 1;
+
+    push(c, (return_addr >> 8) & 0xFF);
+    push(c, return_addr & 0xFF);
+
+    c->pc = op.addr;
+}
+
+// RTS (Return from Subroutine)
+static void RTS(CPU6502 *c, Operand op)
+{
+    (void)op;
+
+    uint8_t lo = pop(c);
+    uint8_t hi = pop(c);
+
+    c->pc = ((hi << 8) | lo) + 1;
+}
+
+// =========================
+// INTERRUPTS
+// =========================
+
+static void BRK(CPU6502 *c, Operand op)
+{
+    (void)op;
+
+    c->pc++;
+
+    // push PC high
+    push(c, (c->pc >> 8) & 0xFF);
+
+    // push PC low
+    push(c, c->pc & 0xFF);
+
+    // push status with B + U set
+    push(c, c->status | (1 << FLAG_B) | (1 << FLAG_U));
+
+    // disable interrupts
+    set_flag(c, FLAG_I, true);
+
+    // load interrupt vector
+    uint16_t lo = mem_read(c->mem, 0xFFFE);
+    uint16_t hi = mem_read(c->mem, 0xFFFF);
+
+    c->pc = (hi << 8) | lo;
+}
+
+// =========================
+// OTHER
+// =========================
+
+static void NOP(CPU6502 *c, Operand op)
+{
+    (void)c;
+    (void)op;
+}
 
 // =========================
 // OPCODES
@@ -1767,7 +1133,7 @@ void run_cycles(CPU6502* c, int cycles)
         Operand op = resolve_operand(c, ins.mode);
 
         // 2. base cycles
-        int used = ins.base_cycles;
+        int used = ins.cycles;
 
         // 3. execute instruction
         ins.fn(c, op);
@@ -1780,45 +1146,111 @@ void run_cycles(CPU6502* c, int cycles)
     }
 }
 
-int main(void) {
-  Memory mem = {0};
+/* int main(int argc, char **argv) */
+/* { */
+/*     if (argc < 2) { */
+/*         printf("Usage: %s <binary file>\n", argv[0]); */
+/*         return 1; */
+/*     } */
 
-  // простая тестовая программа:
-  // LDA #$01
-  // ADC #$01
-  // BRK
-  uint8_t program[] = {
-      0xA9, 0x01, // LDA #1
-      0x69, 0x01, // ADC #1
-      0x00        // BRK
-  };
+/*     FILE *f = fopen(argv[1], "rb"); */
+/*     if (!f) { */
+/*         perror("fopen"); */
+/*         return 1; */
+/*     } */
 
-  // загрузка в память
-  for (size_t i = 0; i < sizeof(program); i++) {
-    mem.data[0x8000 + i] = program[i];
-  }
+/*     fseek(f, 0, SEEK_END); */
+/*     size_t size = ftell(f); */
+/*     fseek(f, 0, SEEK_SET); */
 
-  // reset vector
-  mem.data[0xFFFC] = 0x00;
-  mem.data[0xFFFD] = 0x80;
+/*     uint8_t *program = malloc(size); */
+/*     if (!program) { */
+/*         perror("malloc"); */
+/*         return 1; */
+/*     } */
 
-  CPU6502 cpu = {0};
-  cpu.mem = &mem;
-  cpu.sp = 0xFD;
+/*     fread(program, 1, size, f); */
+/*     fclose(f); */
 
-  init_opcodes(&cpu);
+/*     Memory mem = {0}; */
 
-  // reset
-  cpu.pc = mem_read(cpu.mem, 0xFFFC) | (mem_read(cpu.mem, 0xFFFD) << 8);
+/*     // загрузка в память NES-style */
+/*     for (size_t i = 0; i < size; i++) { */
+/*         mem.data[0x8000 + i] = program[i]; */
+/*     } */
 
-  cpu.running = true;
+/*     free(program); */
 
-  run_cycles(&cpu, 100000);
+/*     // reset vector */
+/*     mem.data[0xFFFC] = 0x00; */
+/*     mem.data[0xFFFD] = 0x80; */
 
-  printf("A = %u\n", cpu.a);
-  printf("X = %u\n", cpu.x);
-  printf("Y = %u\n", cpu.y);
-  printf("Cycles = %llu\n", cpu.cycles);
+/*     CPU6502 cpu = {0}; */
+/*     cpu.mem = &mem; */
+/*     cpu.sp = 0xFD; */
 
-  return 0;
+/*     init_opcodes(&cpu); */
+
+/*     cpu.pc = */
+/*         mem_read(cpu.mem, 0xFFFC) | */
+/*         (mem_read(cpu.mem, 0xFFFD) << 8); */
+
+/*     cpu.running = true; */
+
+/*     run_cycles(&cpu, 100000); */
+
+/*     printf("A = %u\n", cpu.a); */
+/*     printf("X = %u\n", cpu.x); */
+/*     printf("Y = %u\n", cpu.y); */
+/*     printf("Cycles = %llu\n", cpu.cycles); */
+
+/*     return 0; */
+/* } */
+
+
+void cpu_init(CPU6502 *c, Memory *m, GPU *g)
+{
+    memset(c, 0, sizeof(*c));
+
+    c->mem = m;
+    c->gpu = g;
+
+    c->sp = 0xFD;
+    c->running = true;
+
+    init_opcodes(c);
+}
+
+void cpu_reset(CPU6502 *c)
+{
+    uint16_t lo = mem_read(c->mem, 0xFFFC);
+    uint16_t hi = mem_read(c->mem, 0xFFFD);
+
+    c->pc = (hi << 8) | lo;
+    c->running = true;
+}
+
+void cpu_run(CPU6502 *c, int cycles)
+{
+    c->cycles_left += cycles;
+
+    while (c->running && c->cycles_left > 0)
+    {
+        uint8_t opcode = fetch(c);
+        Opcode ins = c->op[opcode];
+
+        if (!ins.fn)
+        {
+            printf("Unknown opcode: %02X\n", opcode);
+            c->running = false;
+            break;
+        }
+
+        Operand op = resolve_operand(c, ins.mode);
+
+        ins.fn(c, op);
+
+        c->cycles_left -= ins.cycles;
+        c->cycles += ins.cycles;
+    }
 }
